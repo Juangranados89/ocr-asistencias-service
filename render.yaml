@@ -1,13 +1,16 @@
-apiVersion: "2023-09-01"      # ← activa el schema moderno
+# render.yaml
+# Versión 4.0 - Simplificada para usar un solo Dockerfile y 'startCommand'
 
 services:
-  # 1. Servicio web
+  # 1. El servicio web que ejecuta la aplicación Flask
   - type: web
     name: ocr-asistencias-web
     env: docker
-    dockerfilePath: ./Dockerfile.web
-
+    dockerfilePath: ./Dockerfile  # <-- Apunta al Dockerfile único
+    startCommand: gunicorn app:app # <-- Comando de inicio para el servicio web
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.6
       - key: REDIS_URL
         fromService:
           type: redis
@@ -19,23 +22,23 @@ services:
         value: /data/uploads
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
-
     secretFiles:
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
+    disks:
+      - name: ocr-storage
+        mountPath: /data
+        sizeGB: 1
 
-    disk:                      # ← singular
-      name: ocr-storage
-      mountPath: /data
-      sizeGB: 1                # plan Free/Starter permite hasta 1 GB
-
-  # 2. Worker de segundo plano
+  # 2. El trabajador en segundo plano que procesa los archivos
   - type: worker
     name: ocr-asistencias-worker
     env: docker
-    dockerfilePath: ./Dockerfile.worker
-
+    dockerfilePath: ./Dockerfile  # <-- Apunta al mismo Dockerfile único
+    startCommand: python worker.py # <-- Comando de inicio para el worker
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.6
       - key: REDIS_URL
         fromService:
           type: redis
@@ -43,20 +46,16 @@ services:
           property: internalUrl
       - key: DATABASE_PATH
         value: /data/registros.db
-      - key: UPLOAD_FOLDER
-        value: /data/uploads
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
-
     secretFiles:
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
+    disks:
+      - name: ocr-storage
+        mountPath: /data
 
-    disk:                      # usa el mismo volumen
-      name: ocr-storage
-      mountPath: /data
-
-  # 3. Redis (cola de trabajos)
+  # 3. La base de datos Redis para la cola de trabajos
   - type: redis
     name: ocr-redis
-    plan: free                 # 25 MB RAM
+    plan: free
