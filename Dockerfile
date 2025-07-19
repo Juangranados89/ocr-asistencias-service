@@ -1,19 +1,15 @@
-# Dockerfile (versión final, usando la imagen oficial de Python)
+# Dockerfile (v3 - Con inicialización de DB en el build)
 
-# Usa la imagen oficial de Python. 'slim-bullseye' es una versión ligera y segura.
 FROM python:3.10-slim-bullseye
 
-# Configura el entorno de Python
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-# Instala las dependencias del sistema, incluyendo poppler-utils
-# --no-install-recommends evita instalar paquetes innecesarios.
+# Instala dependencias del sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Crea un directorio de trabajo y un usuario no privilegiado para mayor seguridad
 WORKDIR /app
 RUN addgroup --system app && adduser --system --group app
 
@@ -21,10 +17,18 @@ RUN addgroup --system app && adduser --system --group app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Cambia al usuario no privilegiado
-USER app
-
-# Copia el resto del código de la aplicación
+# Copia el código de la aplicación
 COPY . .
 
-# El comando de inicio (CMD) se proporcionará desde el render.yaml
+# IMPORTANTE: Establece el path de la base de datos para el script de inicialización
+# Asegúrate de que el directorio /data exista antes de ejecutar el script
+RUN mkdir -p /data && chown -R app:app /data
+ENV DATABASE_PATH=/data/registros.db
+
+# Ejecuta el script de inicialización de la base de datos
+RUN python init_db.py
+
+# Cambia al usuario no privilegiado para la ejecución
+USER app
+
+# El CMD se define en render.yaml
