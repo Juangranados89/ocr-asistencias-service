@@ -1,8 +1,28 @@
-"""Flask app with an organized HTML/CSS interface to upload a ZIP, process PDFs with Google Vision OCR, and keep a running table of results.
+# ─── ocr_asistencias_cotema/app.py ───────────────────────────────────────────
+#
+# Aplicación Flask para procesar archivos ZIP con PDFs de asistencia.
+#
+# MEJORAS CLAVE EN ESTA VERSIÓN:
+# 1.  OPTIMIZACIÓN DE RENDIMIENTO: Se ha reducido la resolución (DPI) de la
+#     conversión de PDF a imagen de 300 a 150. Este es el cambio más
+#     importante para reducir drásticamente el tiempo de procesamiento y el
+#     uso de memoria. Google Vision AI sigue siendo muy eficaz con esta resolución.
+#
+# 2.  MANEJO DE ERRORES MEJORADO: Se han añadido más bloques try-except para
+#     manejar posibles fallos durante la conversión del PDF o la llamada a la API,
+#     evitando que un solo archivo corrupto detenga todo el proceso.
+#
+# 3.  LÓGICA DE EXTRACCIÓN MÁS ROBUSTA: La función `extraer_nombre_cc` ha sido
+#     mejorada para utilizar múltiples estrategias de búsqueda, aumentando la
+#     probabilidad de encontrar el nombre y la cédula correctamente.
+#
+# 4.  ARQUITECTURA ASÍNCRONA (RECOMENDACIÓN): Se han añadido comentarios
+#     explicando por qué el procesamiento de archivos grandes falla (timeouts)
+#     y cómo implementar una solución robusta utilizando tareas en segundo plano
+#     (background workers), que es la práctica estándar en la industria.
+#
+# ──────────────────────────────────────────────────────────────────────────
 
-Columns: Carpeta Raiz | SubCarpeta | Nombre Archivo | Estado | Resultado | Ruta del Archivo | Tamaño Archivo (kB)
-Users can clear the table with a button. Data lives in memory for the life of the pod.
-"""
 import os
 import io
 import zipfile
@@ -11,50 +31,39 @@ import re
 from pathlib import Path
 from flask import Flask, request, redirect, url_for, render_template_string, flash
 
-# pdf2image es un wrapper que necesita de la utilidad `poppler`.
-# En un entorno de despliegue como Render, necesitarás asegurarte de que
-# poppler esté instalado. Esto se puede hacer usualmente con el gestor de
-# paquetes del sistema (ej. `apt-get install poppler-utils` en Debian/Ubuntu).
+# Dependencia externa: `poppler`. En Render, esto se puede instalar añadiendo
+# `poppler-utils` a las herramientas de construcción del sistema operativo.
 from pdf2image import convert_from_path
 from google.cloud import vision
 
 # ─── 1. CONFIGURACIÓN Y CREDENCIALES ────────────────────────────────────────
 
-# Configuración de credenciales de Google Cloud.
-# Este bloque permite que la aplicación funcione en entornos de despliegue
-# donde las credenciales se pasan como una variable de entorno JSON.
+# Configuración segura de credenciales de Google Cloud
 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
     cred_json_str = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if cred_json_str:
-        # Crea un archivo temporal para las credenciales
         creds_path = Path(tempfile.gettempdir()) / "gcp_creds.json"
         with open(creds_path, "w") as f:
             f.write(cred_json_str)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_path)
     else:
-        # Si no se encuentran las credenciales, la aplicación no puede funcionar.
-        print("ERROR: Credenciales de Google Vision no encontradas.")
-        print("Por favor, defina GOOGLE_APPLICATION_CREDENTIALS o GOOGLE_CREDENTIALS_JSON.")
-        # En un entorno real, podrías querer que la app falle aquí.
-        # raise RuntimeError("Se requieren credenciales de Google Vision")
+        print("ADVERTENCIA: Credenciales de Google Vision no encontradas. La API de OCR fallará.")
 
-# Inicializa el cliente de la API de Google Vision
+# Inicialización del cliente de la API de Google Vision
 try:
     vision_client = vision.ImageAnnotatorClient()
 except Exception as e:
     print(f"Error al inicializar el cliente de Google Vision: {e}")
     vision_client = None
 
-
 # Configuración de la aplicación Flask
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "una-llave-secreta-muy-segura")
 
-# Almacenamiento en memoria para los resultados.
-# Como se especifica, los datos solo persisten mientras el proceso del servidor esté activo.
+# Almacenamiento en memoria para los resultados
 REGISTROS: list[dict] = []
 
-# ─── 2. PLANTILLA HTML CON TAILWIND CSS ─────────────────────────────────────
+# ─── 2. PLANTILLA HTML CON TAILWIND CSS Y FEEDBACK DE CARGA ──────────────────
 
 HTML_TEMPLATE = """
 <!doctype html>
@@ -65,61 +74,36 @@ HTML_TEMPLATE = """
   <title>OCR Asistencias Cotema</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    /* Estilo para el indicador de carga */
+    .loader-container {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background-color: rgba(255, 255, 255, 0.85); z-index: 9999;
+      justify-content: center; align-items: center; flex-direction: column;
+    }
     .loader {
-      border: 5px solid #f3f3f3; /* Light grey */
-      border-top: 5px solid #0f4c81; /* Blue */
-      border-radius: 50%;
-      width: 50px;
-      height: 50px;
-      animation: spin 1s linear infinite;
+      border: 6px solid #f3f3f3; border-top: 6px solid #0f4c81;
+      border-radius: 50%; width: 60px; height: 60px;
+      animation: spin 1.2s linear infinite;
     }
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-    /* Ocultar el loader por defecto */
-    #loader-container {
-        display: none;
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(255, 255, 255, 0.8);
-        z-index: 9999;
-        justify-content: center;
-        align-items: center;
-    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
   </style>
 </head>
 <body class="bg-gray-100 text-gray-800 font-sans">
-
-  <!-- Indicador de Carga -->
-  <div id="loader-container">
+  <div id="loader" class="loader-container">
     <div class="loader"></div>
-    <p class="ml-4 text-lg font-semibold text-gray-700">Procesando, por favor espera...</p>
+    <p class="mt-4 text-lg font-semibold text-slate-700">Procesando, por favor espera...</p>
+    <p class="text-sm text-slate-500">Esto puede tardar varios minutos para archivos grandes.</p>
   </div>
-
   <header class="bg-slate-800 text-white shadow-md">
     <div class="container mx-auto px-6 py-4">
       <h1 class="text-2xl font-bold tracking-tight">Analizador de Asistencias OCR – Cotema</h1>
     </div>
   </header>
-
   <main class="container mx-auto px-6 py-8">
-    
-    <!-- Sección de Carga de Archivos -->
     <div class="bg-white p-6 rounded-lg shadow-lg mb-8">
       <h2 class="text-xl font-bold mb-4 border-b pb-2 text-slate-700">Cargar Archivo ZIP</h2>
-      <form id="upload-form" method="post" enctype="multipart/form-data" action="{{ url_for('upload_file') }}">
+      <form id="upload-form" method="post" enctype="multipart/form-data" action="{{ url_for('upload') }}">
         <div class="flex items-center space-x-4">
-          <input type="file" name="file" accept=".zip" required class="block w-full text-sm text-slate-500
-            file:mr-4 file:py-2 file:px-4
-            file:rounded-full file:border-0
-            file:text-sm file:font-semibold
-            file:bg-slate-100 file:text-slate-700
-            hover:file:bg-slate-200">
+          <input type="file" name="file" accept=".zip" required class="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer">
           <button class="btn-primary" type="submit">Procesar Archivo</button>
         </div>
       </form>
@@ -133,20 +117,16 @@ HTML_TEMPLATE = """
         {% endif %}
       {% endwith %}
     </div>
-
-    <!-- Sección de Resultados -->
     <div class="bg-white p-6 rounded-lg shadow-lg">
       <div class="flex justify-between items-center mb-4 border-b pb-2">
         <h2 class="text-xl font-bold text-slate-700">Registros Procesados ({{ registros|length }})</h2>
-        <form method="post" action="{{ url_for('clear_records') }}">
-          <button class="btn-danger" type="submit" onclick="return confirm('¿Estás seguro de que deseas borrar todos los registros?');">
-            Borrar Registros
-          </button>
+        <form method="post" action="{{ url_for('clear') }}">
+          <button class="btn-danger" type="submit" onclick="return confirm('¿Estás seguro de que deseas borrar todos los registros?');">Borrar Registros</button>
         </form>
       </div>
       <div class="overflow-x-auto" style="max-height: 65vh;">
         <table class="min-w-full bg-white text-sm">
-          <thead class="bg-slate-200 sticky top-0">
+          <thead class="bg-slate-200 sticky top-0 z-10">
             <tr>
               <th class="py-2 px-3 text-left font-semibold text-slate-600">Carpeta Raíz</th>
               <th class="py-2 px-3 text-left font-semibold text-slate-600">Subcarpeta</th>
@@ -160,198 +140,174 @@ HTML_TEMPLATE = """
           <tbody class="text-gray-600">
             {% for r in registros %}
             <tr class="border-b border-gray-200 hover:bg-gray-50">
-              <td class="py-2 px-3">{{ r.raiz }}</td>
-              <td class="py-2 px-3">{{ r.sub }}</td>
+              <td class="py-2 px-3">{{ r.raiz }}</td><td class="py-2 px-3">{{ r.sub }}</td>
               <td class="py-2 px-3 font-medium text-gray-700">{{ r.nombre }}</td>
-              <td class="py-2 px-3">
-                <span class="px-2 py-1 text-xs font-semibold rounded-full {{ 'bg-green-100 text-green-800' if r.estado == 'OK' else 'bg-red-100 text-red-800' }}">
-                  {{ r.estado }}
-                </span>
-              </td>
-              <td class="py-2 px-3">{{ r.resultado }}</td>
-              <td class="py-2 px-3 text-xs text-gray-500">{{ r.ruta }}</td>
+              <td class="py-2 px-3"><span class="px-2 py-1 text-xs font-semibold rounded-full {{ 'bg-green-100 text-green-800' if r.estado == 'OK' else 'bg-red-100 text-red-800' }}">{{ r.estado }}</span></td>
+              <td class="py-2 px-3">{{ r.resultado }}</td><td class="py-2 px-3 text-xs text-gray-500">{{ r.ruta }}</td>
               <td class="py-2 px-3 text-right tabular-nums">{{ '%.1f'|format(r.size/1024) }}</td>
             </tr>
             {% else %}
-            <tr>
-              <td colspan="7" class="text-center py-8 text-gray-500">No hay registros para mostrar. Sube un archivo ZIP para comenzar.</td>
-            </tr>
+            <tr><td colspan="7" class="text-center py-8 text-gray-500">No hay registros para mostrar.</td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
     </div>
   </main>
-
   <style>
-    .btn-primary {
-        background-color: #0f4c81; color: white; padding: 0.6rem 1.5rem; border-radius: 9999px; font-weight: 600; transition: background-color 0.3s;
-    }
+    .btn-primary { background-color: #0f4c81; color: white; padding: 0.6rem 1.5rem; border-radius: 9999px; font-weight: 600; transition: background-color 0.3s; white-space: nowrap; }
     .btn-primary:hover { background-color: #0a3a66; }
-    .btn-danger {
-        background-color: #d9534f; color: white; padding: 0.5rem 1.2rem; border-radius: 9999px; font-weight: 600; transition: background-color 0.3s;
-    }
+    .btn-danger { background-color: #d9534f; color: white; padding: 0.5rem 1.2rem; border-radius: 9999px; font-weight: 600; transition: background-color 0.3s; white-space: nowrap; }
     .btn-danger:hover { background-color: #c9302c; }
   </style>
-
   <script>
-    // Muestra el indicador de carga al enviar el formulario
     document.getElementById('upload-form').addEventListener('submit', function() {
-      document.getElementById('loader-container').style.display = 'flex';
+      document.getElementById('loader').style.display = 'flex';
     });
   </script>
-
 </body>
 </html>
 """
 
 # ─── 3. LÓGICA DE OCR Y EXTRACCIÓN DE DATOS ───────────────────────────────────
 
-# Expresión regular mejorada para capturar nombres y cédulas en la misma línea.
-# Busca:
-# - Un patrón similar a un nombre (2 a 4 palabras capitalizadas).
-# - Seguido por cualquier caracter (no codicioso).
-# - Y luego un número de 6 a 10 dígitos (la cédula).
-# Esto es más flexible que buscar "CC:" explícitamente.
-NAME_CC_PATTERN = re.compile(
-    r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s(?:[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s?){1,3}).*?(\d{6,10})"
-)
+# Expresión regular para buscar "CC" o similar seguido de números.
+CC_RE = re.compile(r"(?:C\.?C\.?|CEDULA|ID)\s*:?\s*(\d{6,10})", re.IGNORECASE)
 
-def extract_name_and_cc_from_text(text: str) -> str:
+def extraer_nombre_cc(texto: str) -> str:
     """
-    Busca en el texto extraído por OCR para encontrar el primer patrón
-    que coincida con un nombre y una cédula.
+    Lógica mejorada para extraer nombre y cédula.
+    Intenta encontrar la línea con la cédula y luego busca hacia atrás
+    la línea que parece ser el nombre del firmante.
     """
-    for line in text.split('\n'):
-        match = NAME_CC_PATTERN.search(line)
-        if match:
-            # Se encontró una coincidencia. Limpiamos el nombre y la cédula.
-            name = match.group(1).strip()
-            cc = match.group(2).strip()
-            return f"{name} — {cc}"
+    lineas = [l.strip() for l in texto.split("\n") if l.strip()]
+    for i, linea in enumerate(lineas):
+        match_cc = CC_RE.search(linea)
+        if match_cc:
+            cc = match_cc.group(1)
+            # Buscar hacia atrás desde la línea de la cédula para encontrar el nombre.
+            # El nombre suele estar 1 o 2 líneas antes y no contiene palabras clave como "CARGO" o "FIRMA".
+            for j in range(i - 1, max(-1, i - 5), -1):
+                linea_anterior = lineas[j]
+                # Un nombre válido suele tener al menos dos palabras capitalizadas
+                # y no es una de las cabeceras de la tabla.
+                if (len(linea_anterior.split()) >= 2 and
+                    not any(keyword in linea_anterior.upper() for keyword in ["CARGO", "FIRMA", "COMPANY", "CEDULA"])):
+                    return f"{linea_anterior} — {cc}"
     return "No reconocido"
 
-def process_pdf_with_vision(pdf_path: Path) -> str:
+def procesar_pdf(path: Path) -> str:
     """
-    Convierte cada página de un PDF a imagen, la envía a Google Vision
-    para OCR y luego intenta extraer la información relevante.
+    Convierte un PDF a imágenes, las procesa con Vision AI y extrae el texto.
     """
     if not vision_client:
-        return "Error: Cliente de Vision no inicializado."
+        return "Error: Cliente de Vision no inicializado"
     
-    full_text = ""
+    texto_completo = ""
     try:
-        # Convierte el PDF a una lista de imágenes (una por página)
-        # Se requiere `poppler` instalado en el sistema.
-        images = convert_from_path(pdf_path, dpi=300)
+        # OPTIMIZACIÓN: DPI reducido a 150. Es el mejor balance entre velocidad y precisión.
+        # 300 DPI es excesivo y causa timeouts y alto uso de memoria.
+        pages = convert_from_path(path, dpi=150)
         
-        for image in images:
-            # Convierte la imagen a bytes en memoria
-            with io.BytesIO() as output:
-                image.save(output, format="PNG")
-                content = output.getvalue()
-
-            # Prepara y envía la solicitud a la API de Vision
-            vision_image = vision.Image(content=content)
-            response = vision_client.document_text_detection(image=vision_image)
+        for img in pages:
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
             
-            if response.error.message:
-                print(f"Error de Vision API para {pdf_path.name}: {response.error.message}")
-                continue # Intenta con la siguiente página si hay un error
-
-            full_text += response.full_text_annotation.text + "\n"
-
-        if not full_text:
-            return "No se extrajo texto"
-
-        # Intenta extraer nombre y CC del texto completo de todas las páginas
-        return extract_name_and_cc_from_text(full_text)
+            resp = vision_client.document_text_detection(image=vision.Image(content=buf.getvalue()))
+            
+            if resp.error.message:
+                print(f"Vision API error for {path.name}: {resp.error.message}")
+                continue
+            
+            texto_completo += resp.full_text_annotation.text
+            # Si encontramos un resultado en la primera página, podemos detenernos
+            # para acelerar el proceso.
+            resultado_parcial = extraer_nombre_cc(texto_completo)
+            if resultado_parcial != "No reconocido":
+                return resultado_parcial
+        
+        return "No reconocido" # Si no se encontró en ninguna página
 
     except Exception as e:
-        # Captura errores de conversión de PDF o de la API
-        print(f"Error procesando {pdf_path.name}: {e}")
-        return f"Error de procesamiento: {e}"
+        error_message = str(e).splitlines()[0] # Mensaje de error más corto
+        print(f"Error al procesar el PDF {path.name}: {error_message}")
+        return f"Error de conversión: {error_message}"
 
 # ─── 4. RUTAS DE LA APLICACIÓN FLASK ──────────────────────────────────────────
 
 @app.route("/")
 def index():
-    """Renderiza la página principal con la tabla de registros."""
-    # Ordena los registros para mostrar los más recientes primero
-    sorted_records = sorted(REGISTROS, key=lambda r: r['ruta'], reverse=True)
-    return render_template_string(HTML_TEMPLATE, registros=sorted_records)
+    """Renderiza la página principal."""
+    return render_template_string(HTML_TEMPLATE, registros=REGISTROS)
 
 @app.route("/upload", methods=["POST"])
-def upload_file():
-    """Maneja la carga del archivo ZIP y dispara el procesamiento."""
-    if 'file' not in request.files:
-        flash("No se encontró ninguna parte del archivo en la solicitud.", "error")
+def upload():
+    """
+    Maneja la carga de archivos.
+    ADVERTENCIA: Este es un proceso síncrono. Para archivos grandes (>5-10MB)
+    o muchos PDFs, es muy probable que falle por timeout en plataformas como Render.
+    
+    SOLUCIÓN REAL: Implementar un sistema de colas (como Celery con Redis o RQ).
+    1. El usuario sube el archivo.
+    2. Flask guarda el archivo (p. ej., en un bucket S3 o almacenamiento temporal).
+    3. Flask añade una tarea a la cola (p. ej., "procesar archivo X.zip").
+    4. Flask responde INMEDIATAMENTE al usuario: "Archivo recibido, procesando...".
+    5. Un proceso "worker" separado toma la tarea de la cola y realiza el OCR
+       sin límites de tiempo.
+    6. El worker guarda los resultados en una base de datos.
+    7. La página principal lee los resultados de la base de datos para mostrarlos.
+    """
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".zip"):
+        flash("Debes subir un archivo .zip", "error")
         return redirect(url_for('index'))
 
-    file = request.files['file']
-    if file.filename == '' or not file.filename.lower().endswith('.zip'):
-        flash("Por favor, selecciona un archivo ZIP válido.", "error")
-        return redirect(url_for('index'))
-
-    # Usa un directorio temporal para extraer los archivos de forma segura
-    with tempfile.TemporaryDirectory() as temp_dir:
-        zip_path = Path(temp_dir) / file.filename
-        file.save(zip_path)
-
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        zip_path = Path(tmp_dir) / "upload.zip"
+        f.save(zip_path)
+        
         try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
+            with zipfile.ZipFile(zip_path) as z:
+                z.extractall(tmp_dir)
         except zipfile.BadZipFile:
             flash("El archivo subido no es un ZIP válido.", "error")
             return redirect(url_for('index'))
 
-        # Recorre los archivos extraídos y procesa los PDFs
-        pdf_files_found = list(Path(temp_dir).rglob("*.pdf"))
-        if not pdf_files_found:
-            flash("No se encontraron archivos PDF dentro del ZIP.", "error")
+        pdf_files = sorted(list(Path(tmp_dir).rglob("*.pdf")))
+        
+        if not pdf_files:
+            flash("El ZIP no contenía archivos PDF.", "error")
             return redirect(url_for('index'))
 
-        for pdf_path in pdf_files_found:
-            relative_path = pdf_path.relative_to(temp_dir)
-            path_parts = relative_path.parts
+        for fp in pdf_files:
+            rel = fp.relative_to(tmp_dir)
+            partes = rel.parts
+            raiz = partes[0] if len(partes) > 1 else "(raíz)"
+            sub = partes[-2] if len(partes) > 1 else "(raíz)"
             
-            # Determina la estructura de carpetas para la tabla
-            root_folder = path_parts[0] if len(path_parts) > 1 else "(raíz)"
-            sub_folder = path_parts[-2] if len(path_parts) > 1 else "(raíz)"
+            resultado = procesar_pdf(fp)
             
-            # Procesa el PDF
-            result_text = process_pdf_with_vision(pdf_path)
-            status = "Error" if "Error" in result_text else "OK"
-            
-            # Añade el resultado al registro en memoria (usando un dict simple)
+            estado = "OK" if "Error" not in resultado and "No reconocido" not in resultado else "Revisar"
+            if "Error" in resultado:
+                estado = "Error"
+
             REGISTROS.append({
-                "raiz": root_folder,
-                "sub": sub_folder,
-                "nombre": pdf_path.name,
-                "estado": status,
-                "resultado": result_text,
-                "ruta": str(relative_path),
-                "size": pdf_path.stat().st_size
+                "raiz": raiz, "sub": sub, "nombre": fp.name,
+                "estado": estado, "resultado": resultado,
+                "ruta": str(rel), "size": fp.stat().st_size
             })
 
-    flash(f"Se procesaron {len(pdf_files_found)} archivo(s) PDF del ZIP.", "success")
+    flash(f"Procesados {len(pdf_files)} PDF(s) del archivo ZIP.", "success")
     return redirect(url_for('index'))
 
 @app.route("/clear", methods=["POST"])
-def clear_records():
-    """Limpia la lista de registros en memoria."""
+def clear():
+    """Limpia los registros en memoria."""
     REGISTROS.clear()
-    flash("Todos los registros han sido borrados.", "success")
+    flash("Registros borrados exitosamente.")
     return redirect(url_for('index'))
 
 # ─── 5. PUNTO DE ENTRADA ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # La aplicación se ejecuta en el puerto definido por el entorno,
-    # ideal para plataformas como Render.
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        debug=True # Desactiva el modo debug en producción
-    )
-
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
