@@ -1,4 +1,4 @@
-apiVersion: "1"          # ← Indica que quieres el schema v1 (o 2023-09-01)
+apiVersion: "2023-09-01"      # ← activa el schema moderno
 
 services:
   # 1. Servicio web
@@ -24,10 +24,10 @@ services:
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
 
-    disk:                 # ← singular: un solo disco
+    disk:                      # ← singular
       name: ocr-storage
       mountPath: /data
-      sizeGB: 1
+      sizeGB: 1                # plan Free/Starter permite hasta 1 GB
 
   # 2. Worker de segundo plano
   - type: worker
@@ -52,11 +52,11 @@ services:
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
 
-    disk:                 # usa el mismo volumen
+    disk:                      # usa el mismo volumen
       name: ocr-storage
       mountPath: /data
 
   # 3. Redis (cola de trabajos)
   - type: redis
     name: ocr-redis
-    plan: free
+    plan: free                 # 25 MB RAM
