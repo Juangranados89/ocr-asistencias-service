@@ -1,29 +1,23 @@
-# ───────────────── Imagen base ─────────────────
-FROM python:3.10-slim
+# Dockerfile (único para ambos servicios)
+# Define el entorno base compartido para la aplicación web y el worker.
 
-# ── Dependencia del sistema: poppler-utils para pdf2image
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends poppler-utils && \
-    rm -rf /var/lib/apt/lists/*
+# Usa la imagen base de Python proporcionada por Render
+FROM render/python:3.10.6
 
-# ── Directorio de trabajo
+# Cambia al usuario root para instalar paquetes del sistema
+USER root
+# Instala poppler-utils (esencial para pdf2image)
+RUN apt-get update && apt-get install -y poppler-utils
+# Vuelve al usuario no privilegiado de Render
+USER render
+
+# Establece el directorio de trabajo dentro del contenedor
 WORKDIR /app
 
-# ── Dependencias Python
+# Copia el archivo de dependencias e instálalas
+# Esto se aprovecha del cache de Docker para acelerar builds futuros
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
-# ── Código de la aplicación
-COPY app.py .
-
-# ── Exponer puerto interno (Render lo vincula externamente)
-EXPOSE 5000
-
-# ── Arranque con Gunicorn
-#  • Escucha en 0.0.0.0:5000
-#  • Timeout extendido a 300 s (5 min)
-#  • 2 workers, 2 threads (ajusta según tu carga)
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", \
-     "--timeout", "300", \
-     "--workers", "2", "--threads", "2", \
-     "app:app"]
+# Copia el resto del código de la aplicación al directorio de trabajo
+COPY . .
