@@ -1,5 +1,5 @@
 # render.yaml
-# Versión corregida y validada según la documentación oficial de Render.
+# Versión 2.0 - Corregida y validada según la documentación oficial de Render.
 
 services:
   # 1. El servicio web que ejecuta la aplicación Flask
