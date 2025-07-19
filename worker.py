@@ -1,36 +1,47 @@
-"""
+# worker.py (Versión 2.0)
 import os
 import io
 import zipfile
 import tempfile
 import re
+import sqlite3
 from pathlib import Path
 import redis
 from rq import Worker, Queue, Connection
 from pdf2image import convert_from_path
 from google.cloud import vision
 
-# Importar las funciones de la base de datos
-from database import add_record
-
-# Configuración de credenciales de Google Cloud
+# --- Configuración ---
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "registros.db")
 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
     cred_json_str = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if cred_json_str:
         creds_path = Path(tempfile.gettempdir()) / "gcp_creds.json"
-        with open(creds_path, "w") as f:
-            f.write(cred_json_str)
+        with open(creds_path, "w") as f: f.write(cred_json_str)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_path)
 
-# Inicialización del cliente de Vision
 vision_client = vision.ImageAnnotatorClient()
-
-# Configuración de la conexión a Redis
 listen = ['default']
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 conn = redis.from_url(redis_url)
 
-# Lógica de extracción (idéntica a la de app.py)
+# --- Funciones de Base de Datos (para el worker) ---
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def add_record(record_data):
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT INTO registros (raiz, sub, nombre, estado, resultado, ruta, size) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (record_data['raiz'], record_data['sub'], record_data['nombre'], record_data['estado'],
+         record_data['resultado'], record_data['ruta'], record_data['size'])
+    )
+    conn.commit()
+    conn.close()
+
+# --- Lógica de OCR ---
 def extraer_nombre_cc(texto: str) -> list[str]:
     resultados = []
     CC_NUM_RE = re.compile(r'(\d{6,10})')
@@ -68,13 +79,11 @@ def procesar_pdf(path: Path) -> str:
     except Exception as e:
         return f"Error de conversión: {str(e).splitlines()[0]}"
 
-# La función principal que ejecutará el worker
+# --- Función Principal del Worker ---
 def process_zip_file(zip_path_str):
     zip_path = Path(zip_path_str)
     temp_dir = zip_path.parent
-    
     print(f"Iniciando procesamiento para: {zip_path.name}")
-    
     try:
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(temp_dir)
@@ -88,13 +97,10 @@ def process_zip_file(zip_path_str):
         partes = rel.parts
         raiz = partes[0] if len(partes) > 1 else "(raíz)"
         sub = partes[-2] if len(partes) > 1 else "(raíz)"
-        
         resultado = procesar_pdf(fp)
-        
         estado = "OK"
         if "Error" in resultado: estado = "Error"
         elif "No reconocido" in resultado: estado = "Revisar"
-
         record = {
             "raiz": raiz, "sub": sub, "nombre": fp.name,
             "estado": estado, "resultado": resultado,
@@ -102,14 +108,10 @@ def process_zip_file(zip_path_str):
         }
         add_record(record)
         print(f"Registro añadido para: {fp.name}")
-    
-    # Limpiar el archivo ZIP después de procesar
     os.remove(zip_path)
     print(f"Procesamiento completado para: {zip_path.name}")
-
 
 if __name__ == '__main__':
     with Connection(conn):
         worker = Worker(map(Queue, listen))
         worker.work()
-"""
