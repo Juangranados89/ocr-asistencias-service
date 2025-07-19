@@ -1,0 +1,17 @@
+# Usa la imagen base de Python proporcionada por Render
+FROM render/python:3.10.6
+
+# Instala poppler-utils
+USER root
+RUN apt-get update && apt-get install -y poppler-utils
+USER render
+
+# Copia los archivos de requerimientos e instálalos
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copia el resto de tu aplicación
+COPY . .
+
+# El comando para iniciar el worker
+CMD ["python", "worker.py"]
