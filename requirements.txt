@@ -1,6 +1,10 @@
+# ─── Web & OCR ───────────────────────────
 Flask==2.3.2
+gunicorn==20.1.0
 google-cloud-vision==3.10.2
 pdf2image==1.16.3
-pandas==2.0.1
+
+# ─── Data stack (versiones compatibles) ─
+numpy==2.0.0            # ← obliga a NumPy 2.0
+pandas==2.2.2           # ← compilado contra NumPy 2.x
 openpyxl==3.1.2
-gunicorn==20.1.0
