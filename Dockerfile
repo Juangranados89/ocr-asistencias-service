@@ -1,23 +1,30 @@
-# Dockerfile (único para ambos servicios)
-# Define el entorno base compartido para la aplicación web y el worker.
+# Dockerfile (versión final, usando la imagen oficial de Python)
 
-# Usa la imagen base de Python proporcionada por Render
-FROM render/python:3.10.6
+# Usa la imagen oficial de Python. 'slim-bullseye' es una versión ligera y segura.
+FROM python:3.10-slim-bullseye
 
-# Cambia al usuario root para instalar paquetes del sistema
-USER root
-# Instala poppler-utils (esencial para pdf2image)
-RUN apt-get update && apt-get install -y poppler-utils
-# Vuelve al usuario no privilegiado de Render
-USER render
+# Configura el entorno de Python
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
 
-# Establece el directorio de trabajo dentro del contenedor
+# Instala las dependencias del sistema, incluyendo poppler-utils
+# --no-install-recommends evita instalar paquetes innecesarios.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Crea un directorio de trabajo y un usuario no privilegiado para mayor seguridad
 WORKDIR /app
+RUN addgroup --system app && adduser --system --group app
 
-# Copia el archivo de dependencias e instálalas
-# Esto se aprovecha del cache de Docker para acelerar builds futuros
+# Copia e instala las dependencias de Python
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia el resto del código de la aplicación al directorio de trabajo
+# Cambia al usuario no privilegiado
+USER app
+
+# Copia el resto del código de la aplicación
 COPY . .
+
+# El comando de inicio (CMD) se proporcionará desde el render.yaml
