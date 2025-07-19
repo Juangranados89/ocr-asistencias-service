@@ -2,24 +2,28 @@
 #
 # Aplicación Flask para procesar archivos ZIP con PDFs de asistencia.
 #
-# MEJORAS CLAVE EN ESTA VERSIÓN:
-# 1.  OPTIMIZACIÓN DE RENDIMIENTO: Se ha reducido la resolución (DPI) de la
-#     conversión de PDF a imagen de 300 a 150. Este es el cambio más
-#     importante para reducir drásticamente el tiempo de procesamiento y el
-#     uso de memoria. Google Vision AI sigue siendo muy eficaz con esta resolución.
+# MEJORAS CLAVE EN ESTA VERSIÓN (v4):
+# 1.  LÓGICA DE EXTRACCIÓN DE DATOS REFORZADA: Se ha reescrito por completo la
+#     función `extraer_nombre_cc` basándose en los nuevos archivos de ejemplo.
+#     La nueva estrategia es más robusta:
+#       a. Primero, busca un número de cédula válido (6-10 dígitos) en cada línea.
+#       b. Si lo encuentra, analiza el texto ANTERIOR en la misma línea.
+#       c. Limpia y valida ese texto para asegurarse de que parece un nombre
+#          (p. ej., tiene al menos dos palabras y no es un encabezado de tabla).
+#     Este enfoque es mucho más flexible y preciso que el anterior.
 #
-# 2.  MANEJO DE ERRORES MEJORADO: Se han añadido más bloques try-except para
-#     manejar posibles fallos durante la conversión del PDF o la llamada a la API,
-#     evitando que un solo archivo corrupto detenga todo el proceso.
+# 2.  OPTIMIZACIÓN DE PROCESAMIENTO: Se mantiene la reducción de DPI a 150 para
+#     un rendimiento óptimo y se añade una optimización: si se encuentra un
+#     resultado válido en la primera página del PDF, el proceso se detiene y
+#     devuelve ese resultado, evitando procesar páginas innecesarias.
 #
-# 3.  LÓGICA DE EXTRACCIÓN MÁS ROBUSTA: La función `extraer_nombre_cc` ha sido
-#     mejorada para utilizar múltiples estrategias de búsqueda, aumentando la
-#     probabilidad de encontrar el nombre y la cédula correctamente.
+# 3.  MEJORA DE ESTADO EN LA TABLA: El estado ahora es más descriptivo.
+#     - "OK": Si se encontró un nombre y cédula.
+#     - "Revisar": Si el OCR funcionó pero no se reconoció un patrón válido.
+#     - "Error": Si hubo un fallo técnico al procesar el archivo.
 #
-# 4.  ARQUITECTURA ASÍNCRONA (RECOMENDACIÓN): Se han añadido comentarios
-#     explicando por qué el procesamiento de archivos grandes falla (timeouts)
-#     y cómo implementar una solución robusta utilizando tareas en segundo plano
-#     (background workers), que es la práctica estándar en la industria.
+# 4.  INTERFAZ DE USUARIO PULIDA: Pequeños ajustes en la tabla de resultados
+#     para mejorar la legibilidad y la presentación de los datos.
 #
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -31,8 +35,8 @@ import re
 from pathlib import Path
 from flask import Flask, request, redirect, url_for, render_template_string, flash
 
-# Dependencia externa: `poppler`. En Render, esto se puede instalar añadiendo
-# `poppler-utils` a las herramientas de construcción del sistema operativo.
+# Dependencia externa: `poppler`. Necesario para pdf2image.
+# En Render: ir a Environment > Dockerfile y añadir `RUN apt-get update && apt-get install -y poppler-utils`
 from pdf2image import convert_from_path
 from google.cloud import vision
 
@@ -63,7 +67,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "una-llave-secreta-muy-segur
 # Almacenamiento en memoria para los resultados
 REGISTROS: list[dict] = []
 
-# ─── 2. PLANTILLA HTML CON TAILWIND CSS Y FEEDBACK DE CARGA ──────────────────
+# ─── 2. PLANTILLA HTML CON TAILWIND CSS ─────────────────────────────────────
 
 HTML_TEMPLATE = """
 <!doctype html>
@@ -142,7 +146,14 @@ HTML_TEMPLATE = """
             <tr class="border-b border-gray-200 hover:bg-gray-50">
               <td class="py-2 px-3">{{ r.raiz }}</td><td class="py-2 px-3">{{ r.sub }}</td>
               <td class="py-2 px-3 font-medium text-gray-700">{{ r.nombre }}</td>
-              <td class="py-2 px-3"><span class="px-2 py-1 text-xs font-semibold rounded-full {{ 'bg-green-100 text-green-800' if r.estado == 'OK' else 'bg-red-100 text-red-800' }}">{{ r.estado }}</span></td>
+              <td class="py-2 px-3">
+                <span class="px-2 py-1 text-xs font-semibold rounded-full 
+                  {% if r.estado == 'OK' %}bg-green-100 text-green-800
+                  {% elif r.estado == 'Revisar' %}bg-yellow-100 text-yellow-800
+                  {% else %}bg-red-100 text-red-800{% endif %}">
+                  {{ r.estado }}
+                </span>
+              </td>
               <td class="py-2 px-3">{{ r.resultado }}</td><td class="py-2 px-3 text-xs text-gray-500">{{ r.ruta }}</td>
               <td class="py-2 px-3 text-right tabular-nums">{{ '%.1f'|format(r.size/1024) }}</td>
             </tr>
@@ -169,67 +180,86 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# ─── 3. LÓGICA DE OCR Y EXTRACCIÓN DE DATOS ───────────────────────────────────
-
-# Expresión regular para buscar "CC" o similar seguido de números.
-CC_RE = re.compile(r"(?:C\.?C\.?|CEDULA|ID)\s*:?\s*(\d{6,10})", re.IGNORECASE)
+# ─── 3. LÓGICA DE OCR Y EXTRACCIÓN DE DATOS (MEJORADA) ───────────────────────
 
 def extraer_nombre_cc(texto: str) -> str:
     """
-    Lógica mejorada para extraer nombre y cédula.
-    Intenta encontrar la línea con la cédula y luego busca hacia atrás
-    la línea que parece ser el nombre del firmante.
+    Lógica mejorada para extraer nombre y cédula del texto de OCR.
+    Busca primero la cédula y luego infiere el nombre a partir del texto precedente.
     """
-    lineas = [l.strip() for l in texto.split("\n") if l.strip()]
-    for i, linea in enumerate(lineas):
-        match_cc = CC_RE.search(linea)
-        if match_cc:
-            cc = match_cc.group(1)
-            # Buscar hacia atrás desde la línea de la cédula para encontrar el nombre.
-            # El nombre suele estar 1 o 2 líneas antes y no contiene palabras clave como "CARGO" o "FIRMA".
-            for j in range(i - 1, max(-1, i - 5), -1):
-                linea_anterior = lineas[j]
-                # Un nombre válido suele tener al menos dos palabras capitalizadas
-                # y no es una de las cabeceras de la tabla.
-                if (len(linea_anterior.split()) >= 2 and
-                    not any(keyword in linea_anterior.upper() for keyword in ["CARGO", "FIRMA", "COMPANY", "CEDULA"])):
-                    return f"{linea_anterior} — {cc}"
+    # Regex para encontrar un número de 6 a 10 dígitos (potencial cédula)
+    CC_NUM_RE = re.compile(r'(\d{6,10})')
+    # Palabras clave a ignorar para no confundir encabezados con nombres
+    IGNORE_KEYWORDS = [
+        "CARGO", "FIRMA", "COMPANY", "CEDULA", "APELLIDOS", "SIGNATURE",
+        "TITLE", "JOB", "LISTADO", "ASISTENCIA", "FECHA", "PROYECTO"
+    ]
+
+    lineas = [line.strip() for line in texto.split("\n") if line.strip()]
+
+    for linea in lineas:
+        # Busca todas las posibles cédulas en la línea
+        matches = list(CC_NUM_RE.finditer(linea))
+        if matches:
+            # Usualmente, la cédula es el último número largo en la línea
+            match = matches[-1]
+            cc = match.group(1)
+            
+            # El texto antes de la cédula es el candidato a nombre
+            potential_name = linea[:match.start()].strip()
+            
+            # Limpieza del candidato:
+            # 1. Eliminar números de lista al inicio (ej. "1. Juan Perez")
+            potential_name = re.sub(r"^\d+\s*[.-]?\s*", "", potential_name)
+            # 2. Eliminar caracteres no alfanuméricos que no sean parte de un nombre
+            potential_name = re.sub(r"[^\w\sÁÉÍÓÚÑáéíóúñ'-]", "", potential_name).strip()
+
+            # Validación final del nombre:
+            # - Debe tener al menos dos palabras.
+            # - No debe contener palabras clave de encabezados.
+            if (len(potential_name.split()) >= 2 and
+                not any(keyword in potential_name.upper() for keyword in IGNORE_KEYWORDS)):
+                return f"{potential_name} — {cc}"
+                
     return "No reconocido"
 
 def procesar_pdf(path: Path) -> str:
     """
-    Convierte un PDF a imágenes, las procesa con Vision AI y extrae el texto.
+    Convierte un PDF a imágenes, las procesa con Vision AI y extrae la información.
     """
     if not vision_client:
         return "Error: Cliente de Vision no inicializado"
     
-    texto_completo = ""
     try:
-        # OPTIMIZACIÓN: DPI reducido a 150. Es el mejor balance entre velocidad y precisión.
-        # 300 DPI es excesivo y causa timeouts y alto uso de memoria.
+        # OPTIMIZACIÓN: DPI 150 es el mejor balance entre velocidad y precisión.
         pages = convert_from_path(path, dpi=150)
         
+        texto_completo = ""
         for img in pages:
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            
-            resp = vision_client.document_text_detection(image=vision.Image(content=buf.getvalue()))
+            with io.BytesIO() as buf:
+                img.save(buf, format="PNG")
+                content = buf.getvalue()
+
+            resp = vision_client.document_text_detection(image=vision.Image(content=content))
             
             if resp.error.message:
-                print(f"Vision API error for {path.name}: {resp.error.message}")
+                print(f"Error de Vision API para {path.name}: {resp.error.message}")
                 continue
             
-            texto_completo += resp.full_text_annotation.text
-            # Si encontramos un resultado en la primera página, podemos detenernos
-            # para acelerar el proceso.
-            resultado_parcial = extraer_nombre_cc(texto_completo)
+            texto_pagina = resp.full_text_annotation.text
+            texto_completo += texto_pagina + "\n"
+            
+            # OPTIMIZACIÓN: Si encontramos un resultado en la primera página, lo devolvemos
+            # para no procesar el resto del documento innecesariamente.
+            resultado_parcial = extraer_nombre_cc(texto_pagina)
             if resultado_parcial != "No reconocido":
                 return resultado_parcial
         
-        return "No reconocido" # Si no se encontró en ninguna página
+        # Si no se encontró en la primera página, intentar con el texto completo
+        return extraer_nombre_cc(texto_completo) if texto_completo else "No se extrajo texto"
 
     except Exception as e:
-        error_message = str(e).splitlines()[0] # Mensaje de error más corto
+        error_message = str(e).splitlines()[0]
         print(f"Error al procesar el PDF {path.name}: {error_message}")
         return f"Error de conversión: {error_message}"
 
@@ -237,26 +267,12 @@ def procesar_pdf(path: Path) -> str:
 
 @app.route("/")
 def index():
-    """Renderiza la página principal."""
+    """Renderiza la página principal con la tabla de registros."""
     return render_template_string(HTML_TEMPLATE, registros=REGISTROS)
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    """
-    Maneja la carga de archivos.
-    ADVERTENCIA: Este es un proceso síncrono. Para archivos grandes (>5-10MB)
-    o muchos PDFs, es muy probable que falle por timeout en plataformas como Render.
-    
-    SOLUCIÓN REAL: Implementar un sistema de colas (como Celery con Redis o RQ).
-    1. El usuario sube el archivo.
-    2. Flask guarda el archivo (p. ej., en un bucket S3 o almacenamiento temporal).
-    3. Flask añade una tarea a la cola (p. ej., "procesar archivo X.zip").
-    4. Flask responde INMEDIATAMENTE al usuario: "Archivo recibido, procesando...".
-    5. Un proceso "worker" separado toma la tarea de la cola y realiza el OCR
-       sin límites de tiempo.
-    6. El worker guarda los resultados en una base de datos.
-    7. La página principal lee los resultados de la base de datos para mostrarlos.
-    """
+    """Maneja la carga del archivo ZIP y el procesamiento síncrono."""
     f = request.files.get("file")
     if not f or not f.filename.lower().endswith(".zip"):
         flash("Debes subir un archivo .zip", "error")
@@ -274,7 +290,6 @@ def upload():
             return redirect(url_for('index'))
 
         pdf_files = sorted(list(Path(tmp_dir).rglob("*.pdf")))
-        
         if not pdf_files:
             flash("El ZIP no contenía archivos PDF.", "error")
             return redirect(url_for('index'))
@@ -287,9 +302,11 @@ def upload():
             
             resultado = procesar_pdf(fp)
             
-            estado = "OK" if "Error" not in resultado and "No reconocido" not in resultado else "Revisar"
+            estado = "OK"
             if "Error" in resultado:
                 estado = "Error"
+            elif "No reconocido" in resultado:
+                estado = "Revisar"
 
             REGISTROS.append({
                 "raiz": raiz, "sub": sub, "nombre": fp.name,
