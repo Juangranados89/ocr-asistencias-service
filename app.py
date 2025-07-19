@@ -2,28 +2,23 @@
 #
 # Aplicación Flask para procesar archivos ZIP con PDFs de asistencia.
 #
-# MEJORAS CLAVE EN ESTA VERSIÓN (v4):
-# 1.  LÓGICA DE EXTRACCIÓN DE DATOS REFORZADA: Se ha reescrito por completo la
-#     función `extraer_nombre_cc` basándose en los nuevos archivos de ejemplo.
-#     La nueva estrategia es más robusta:
-#       a. Primero, busca un número de cédula válido (6-10 dígitos) en cada línea.
-#       b. Si lo encuentra, analiza el texto ANTERIOR en la misma línea.
-#       c. Limpia y valida ese texto para asegurarse de que parece un nombre
-#          (p. ej., tiene al menos dos palabras y no es un encabezado de tabla).
-#     Este enfoque es mucho más flexible y preciso que el anterior.
+# MEJORAS CLAVE EN ESTA VERSIÓN (v5):
+# 1.  BÚSQUEDA EXHAUSTIVA EN TODAS LAS PÁGINAS: Se ha modificado la lógica para
+#     que la aplicación procese TODAS las páginas de un PDF, en lugar de
+#     detenerse en el primer resultado.
 #
-# 2.  OPTIMIZACIÓN DE PROCESAMIENTO: Se mantiene la reducción de DPI a 150 para
-#     un rendimiento óptimo y se añade una optimización: si se encuentra un
-#     resultado válido en la primera página del PDF, el proceso se detiene y
-#     devuelve ese resultado, evitando procesar páginas innecesarias.
+# 2.  EXTRACCIÓN DE MÚLTIPLES RESULTADOS: La función `extraer_nombre_cc` ahora
+#     devuelve una lista de TODAS las coincidencias de nombre-cédula encontradas
+#     en un bloque de texto, no solo la primera.
 #
-# 3.  MEJORA DE ESTADO EN LA TABLA: El estado ahora es más descriptivo.
-#     - "OK": Si se encontró un nombre y cédula.
-#     - "Revisar": Si el OCR funcionó pero no se reconoció un patrón válido.
-#     - "Error": Si hubo un fallo técnico al procesar el archivo.
+# 3.  AGREGACIÓN DE RESULTADOS: La aplicación ahora acumula todos los resultados
+#     únicos de todas las páginas y los presenta en la tabla, separados por un
+#     punto y coma. Esto asegura que no se pierda información si un documento
+#     contiene múltiples registros válidos.
 #
-# 4.  INTERFAZ DE USUARIO PULIDA: Pequeños ajustes en la tabla de resultados
-#     para mejorar la legibilidad y la presentación de los datos.
+# 4.  LÓGICA DE EXTRACCIÓN MANTENIDA: Se conserva la lógica robusta que busca
+#     primero la cédula y luego infiere el nombre, ya que ha demostrado ser
+#     efectiva con el formato de los documentos.
 #
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -146,8 +141,7 @@ HTML_TEMPLATE = """
             <tr class="border-b border-gray-200 hover:bg-gray-50">
               <td class="py-2 px-3">{{ r.raiz }}</td><td class="py-2 px-3">{{ r.sub }}</td>
               <td class="py-2 px-3 font-medium text-gray-700">{{ r.nombre }}</td>
-              <td class="py-2 px-3">
-                <span class="px-2 py-1 text-xs font-semibold rounded-full 
+              <td class="py-2 px-3"><span class="px-2 py-1 text-xs font-semibold rounded-full 
                   {% if r.estado == 'OK' %}bg-green-100 text-green-800
                   {% elif r.estado == 'Revisar' %}bg-yellow-100 text-yellow-800
                   {% else %}bg-red-100 text-red-800{% endif %}">
@@ -180,16 +174,15 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# ─── 3. LÓGICA DE OCR Y EXTRACCIÓN DE DATOS (MEJORADA) ───────────────────────
+# ─── 3. LÓGICA DE OCR Y EXTRACCIÓN DE DATOS (EXHAUSTIVA) ─────────────────────
 
-def extraer_nombre_cc(texto: str) -> str:
+def extraer_nombre_cc(texto: str) -> list[str]:
     """
-    Lógica mejorada para extraer nombre y cédula del texto de OCR.
-    Busca primero la cédula y luego infiere el nombre a partir del texto precedente.
+    Busca TODAS las coincidencias de nombre y cédula en el texto de OCR.
+    Devuelve una lista de strings con formato "Nombre — CC".
     """
-    # Regex para encontrar un número de 6 a 10 dígitos (potencial cédula)
+    resultados = []
     CC_NUM_RE = re.compile(r'(\d{6,10})')
-    # Palabras clave a ignorar para no confundir encabezados con nombres
     IGNORE_KEYWORDS = [
         "CARGO", "FIRMA", "COMPANY", "CEDULA", "APELLIDOS", "SIGNATURE",
         "TITLE", "JOB", "LISTADO", "ASISTENCIA", "FECHA", "PROYECTO"
@@ -198,43 +191,32 @@ def extraer_nombre_cc(texto: str) -> str:
     lineas = [line.strip() for line in texto.split("\n") if line.strip()]
 
     for linea in lineas:
-        # Busca todas las posibles cédulas en la línea
         matches = list(CC_NUM_RE.finditer(linea))
         if matches:
-            # Usualmente, la cédula es el último número largo en la línea
             match = matches[-1]
             cc = match.group(1)
             
-            # El texto antes de la cédula es el candidato a nombre
             potential_name = linea[:match.start()].strip()
-            
-            # Limpieza del candidato:
-            # 1. Eliminar números de lista al inicio (ej. "1. Juan Perez")
             potential_name = re.sub(r"^\d+\s*[.-]?\s*", "", potential_name)
-            # 2. Eliminar caracteres no alfanuméricos que no sean parte de un nombre
             potential_name = re.sub(r"[^\w\sÁÉÍÓÚÑáéíóúñ'-]", "", potential_name).strip()
 
-            # Validación final del nombre:
-            # - Debe tener al menos dos palabras.
-            # - No debe contener palabras clave de encabezados.
             if (len(potential_name.split()) >= 2 and
                 not any(keyword in potential_name.upper() for keyword in IGNORE_KEYWORDS)):
-                return f"{potential_name} — {cc}"
+                resultados.append(f"{potential_name} — {cc}")
                 
-    return "No reconocido"
+    return resultados
 
 def procesar_pdf(path: Path) -> str:
     """
-    Convierte un PDF a imágenes, las procesa con Vision AI y extrae la información.
+    Procesa TODAS las páginas de un PDF, acumula los resultados y los devuelve.
     """
     if not vision_client:
         return "Error: Cliente de Vision no inicializado"
     
+    todos_los_resultados = []
     try:
-        # OPTIMIZACIÓN: DPI 150 es el mejor balance entre velocidad y precisión.
         pages = convert_from_path(path, dpi=150)
         
-        texto_completo = ""
         for img in pages:
             with io.BytesIO() as buf:
                 img.save(buf, format="PNG")
@@ -247,16 +229,16 @@ def procesar_pdf(path: Path) -> str:
                 continue
             
             texto_pagina = resp.full_text_annotation.text
-            texto_completo += texto_pagina + "\n"
-            
-            # OPTIMIZACIÓN: Si encontramos un resultado en la primera página, lo devolvemos
-            # para no procesar el resto del documento innecesariamente.
-            resultado_parcial = extraer_nombre_cc(texto_pagina)
-            if resultado_parcial != "No reconocido":
-                return resultado_parcial
+            resultados_pagina = extraer_nombre_cc(texto_pagina)
+            if resultados_pagina:
+                todos_los_resultados.extend(resultados_pagina)
         
-        # Si no se encontró en la primera página, intentar con el texto completo
-        return extraer_nombre_cc(texto_completo) if texto_completo else "No se extrajo texto"
+        if not todos_los_resultados:
+            return "No reconocido"
+        
+        # Eliminar duplicados y unir los resultados en un solo string
+        resultados_unicos = sorted(list(set(todos_los_resultados)))
+        return "; ".join(resultados_unicos)
 
     except Exception as e:
         error_message = str(e).splitlines()[0]
