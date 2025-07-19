@@ -1,4 +1,4 @@
-# worker.py (Versión 2.0)
+# worker.py (v3 - Simplificado)
 import os
 import io
 import zipfile
@@ -12,7 +12,7 @@ from pdf2image import convert_from_path
 from google.cloud import vision
 
 # --- Configuración ---
-DATABASE_PATH = os.environ.get("DATABASE_PATH", "registros.db")
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "/data/registros.db")
 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
     cred_json_str = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if cred_json_str:
@@ -27,9 +27,7 @@ conn = redis.from_url(redis_url)
 
 # --- Funciones de Base de Datos (para el worker) ---
 def get_db_connection():
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return sqlite3.connect(DATABASE_PATH)
 
 def add_record(record_data):
     conn = get_db_connection()
@@ -82,18 +80,21 @@ def procesar_pdf(path: Path) -> str:
 # --- Función Principal del Worker ---
 def process_zip_file(zip_path_str):
     zip_path = Path(zip_path_str)
-    temp_dir = zip_path.parent
+    # El worker ahora asume que el directorio de uploads existe
+    upload_dir = zip_path.parent
+    
     print(f"Iniciando procesamiento para: {zip_path.name}")
     try:
         with zipfile.ZipFile(zip_path) as z:
-            z.extractall(temp_dir)
+            z.extractall(upload_dir)
     except Exception as e:
         print(f"Error al descomprimir {zip_path.name}: {e}")
         return
 
-    pdf_files = sorted(list(Path(temp_dir).rglob("*.pdf")))
+    pdf_files = sorted(list(Path(upload_dir).rglob("*.pdf")))
     for fp in pdf_files:
-        rel = fp.relative_to(temp_dir)
+        if fp.name == zip_path.name: continue # Evitar procesar el propio zip si tuviera extensión pdf
+        rel = fp.relative_to(upload_dir)
         partes = rel.parts
         raiz = partes[0] if len(partes) > 1 else "(raíz)"
         sub = partes[-2] if len(partes) > 1 else "(raíz)"
@@ -108,6 +109,8 @@ def process_zip_file(zip_path_str):
         }
         add_record(record)
         print(f"Registro añadido para: {fp.name}")
+        os.remove(fp) # Limpiar el PDF extraído
+        
     os.remove(zip_path)
     print(f"Procesamiento completado para: {zip_path.name}")
 
