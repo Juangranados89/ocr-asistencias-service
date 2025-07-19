@@ -1,0 +1,63 @@
+# render.yaml
+# Archivo de configuración para el Blueprint de Render.
+# Define todos los servicios necesarios para la aplicación OCR.
+
+services:
+  # 1. El servicio web que ejecuta la aplicación Flask
+  - type: web
+    name: ocr-asistencias-web
+    env: docker # Usamos Docker para poder instalar poppler-utils
+    repo: https://github.com/Juangranados89/ocr-asistencias-service.git # ¡Cambia esto a la URL de tu repo!
+    dockerfilePath: ./Dockerfile.web # Ruta al Dockerfile para el servicio web
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.6
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: ocr-redis
+          property: internalUrl
+      - key: DATABASE_PATH
+        value: /data/registros.db
+      - key: UPLOAD_FOLDER
+        value: /data/uploads
+      - key: GOOGLE_CREDENTIALS_JSON
+        fromSecretFile:
+          name: google-credentials
+          path: credentials.json
+    disks:
+      - name: ocr-storage
+        mountPath: /data
+        sizeGB: 1
+
+  # 2. El trabajador en segundo plano que procesa los archivos
+  - type: worker
+    name: ocr-asistencias-worker
+    env: docker
+    repo: https://github.com/Juangranados89/ocr-asistencias-service.git # ¡Cambia esto a la URL de tu repo!
+    dockerfilePath: ./Dockerfile.worker # Ruta al Dockerfile para el worker
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.6
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: ocr-redis
+          property: internalUrl
+      - key: DATABASE_PATH
+        value: /data/registros.db
+      - key: GOOGLE_CREDENTIALS_JSON
+        fromSecretFile:
+          name: google-credentials
+          path: credentials.json
+    disks:
+      - name: ocr-storage
+        mountPath: /data
+        sizeGB: 1
+
+  # 3. La base de datos Redis para la cola de trabajos
+  - type: redis
+    name: ocr-redis
+
+# El disco persistente se define aquí, pero se adjunta en cada servicio arriba.
+# Esto asegura que tanto el 'web' como el 'worker' vean los mismos archivos.
