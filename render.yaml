@@ -1,15 +1,13 @@
-# render.yaml
-# Versión 2.0 - Corregida y validada según la documentación oficial de Render.
+apiVersion: "1"          # ← Indica que quieres el schema v1 (o 2023-09-01)
 
 services:
-  # 1. El servicio web que ejecuta la aplicación Flask
+  # 1. Servicio web
   - type: web
     name: ocr-asistencias-web
     env: docker
     dockerfilePath: ./Dockerfile.web
+
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.6
       - key: REDIS_URL
         fromService:
           type: redis
@@ -21,22 +19,23 @@ services:
         value: /data/uploads
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
+
     secretFiles:
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
-    disks:
-      - name: ocr-storage
-        mountPath: /data
-        sizeGB: 1
 
-  # 2. El trabajador en segundo plano que procesa los archivos
+    disk:                 # ← singular: un solo disco
+      name: ocr-storage
+      mountPath: /data
+      sizeGB: 1
+
+  # 2. Worker de segundo plano
   - type: worker
     name: ocr-asistencias-worker
     env: docker
     dockerfilePath: ./Dockerfile.worker
+
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.6
       - key: REDIS_URL
         fromService:
           type: redis
@@ -44,16 +43,20 @@ services:
           property: internalUrl
       - key: DATABASE_PATH
         value: /data/registros.db
+      - key: UPLOAD_FOLDER
+        value: /data/uploads
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
+
     secretFiles:
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
-    disks:
-      - name: ocr-storage
-        mountPath: /data
 
-  # 3. La base de datos Redis para la cola de trabajos
+    disk:                 # usa el mismo volumen
+      name: ocr-storage
+      mountPath: /data
+
+  # 3. Redis (cola de trabajos)
   - type: redis
     name: ocr-redis
     plan: free
