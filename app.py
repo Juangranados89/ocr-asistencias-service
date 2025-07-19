@@ -1,31 +1,49 @@
+# app.py (Versión 2.0)
 import os
+import sqlite3
 from pathlib import Path
 from flask import Flask, request, redirect, url_for, render_template_string, flash, jsonify
 import redis
 from rq import Queue
 from werkzeug.utils import secure_filename
 
-# Importar funciones de la base de datos y el inicializador
-from database import init_db, get_all_records, clear_all_records
-
-# Configuración de la aplicación Flask
+# --- Configuración ---
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "una-llave-secreta-muy-segura")
-
-# Directorio para subidas en el disco persistente
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "registros.db")
 UPLOAD_FOLDER = Path(os.environ.get("UPLOAD_FOLDER", "/data/uploads"))
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
-
-# Conexión a la cola de Redis
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 redis_conn = redis.from_url(redis_url)
 q = Queue(connection=redis_conn)
 
-# Inicializar la base de datos al arrancar la aplicación
-with app.app_context():
-    init_db()
+# --- Funciones de Base de Datos ---
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# Plantilla HTML (sin cambios, se mantiene igual)
+def init_db():
+    if not Path(DATABASE_PATH).exists():
+        print("Inicializando la base de datos...")
+        conn = get_db_connection()
+        conn.execute('''
+            CREATE TABLE registros (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raiz TEXT NOT NULL,
+                sub TEXT NOT NULL,
+                nombre TEXT NOT NULL,
+                estado TEXT NOT NULL,
+                resultado TEXT,
+                ruta TEXT NOT NULL,
+                size REAL NOT NULL
+            );
+        ''')
+        conn.commit()
+        conn.close()
+        print("Base de datos inicializada.")
+
+# --- Plantilla HTML (sin cambios) ---
 HTML_TEMPLATE = """
 <!doctype html>
 <html lang="es">
@@ -87,93 +105,69 @@ HTML_TEMPLATE = """
     </div>
   </main>
   <script>
-    document.getElementById('upload-form').addEventListener('submit', function() {
-      document.getElementById('loader').style.display = 'flex';
-    });
-
+    document.getElementById('upload-form').addEventListener('submit', function() { document.getElementById('loader').style.display = 'flex'; });
     function updateTable(records) {
         const tbody = document.getElementById('results-table-body');
         const countSpan = document.getElementById('record-count');
         tbody.innerHTML = '';
         countSpan.textContent = records.length;
-
         if (records.length === 0) {
             tbody.innerHTML = '<tr><td colspan="7" class="text-center py-8 text-gray-500">No hay registros para mostrar.</td></tr>';
             return;
         }
-
         records.forEach(r => {
             const statusColor = r.estado === 'OK' ? 'bg-green-100 text-green-800' : (r.estado === 'Revisar' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800');
             const sizeKb = (r.size / 1024).toFixed(1);
-            const row = `
-                <tr class="border-b border-gray-200 hover:bg-gray-50">
-                  <td class="py-2 px-3">${r.raiz}</td><td class="py-2 px-3">${r.sub}</td>
-                  <td class="py-2 px-3 font-medium text-gray-700">${r.nombre}</td>
-                  <td class="py-2 px-3"><span class="px-2 py-1 text-xs font-semibold rounded-full ${statusColor}">${r.estado}</span></td>
-                  <td class="py-2 px-3">${r.resultado}</td><td class="py-2 px-3 text-xs text-gray-500">${r.ruta}</td>
-                  <td class="py-2 px-3 text-right tabular-nums">${sizeKb}</td>
-                </tr>`;
+            const row = `<tr class="border-b border-gray-200 hover:bg-gray-50"><td class="py-2 px-3">${r.raiz}</td><td class="py-2 px-3">${r.sub}</td><td class="py-2 px-3 font-medium text-gray-700">${r.nombre}</td><td class="py-2 px-3"><span class="px-2 py-1 text-xs font-semibold rounded-full ${statusColor}">${r.estado}</span></td><td class="py-2 px-3">${r.resultado}</td><td class="py-2 px-3 text-xs text-gray-500">${r.ruta}</td><td class="py-2 px-3 text-right tabular-nums">${sizeKb}</td></tr>`;
             tbody.innerHTML += row;
         });
     }
-
     function fetchResults() {
-        fetch("{{ url_for('get_results') }}")
-            .then(response => response.json())
-            .then(data => {
-                updateTable(data);
-            })
-            .catch(error => console.error('Error fetching results:', error));
+        fetch("{{ url_for('get_results') }}").then(response => response.json()).then(data => { updateTable(data); }).catch(error => console.error('Error fetching results:', error));
     }
-
-    // Cargar resultados al inicio y luego cada 5 segundos
-    document.addEventListener('DOMContentLoaded', function() {
-        fetchResults();
-        setInterval(fetchResults, 5000);
-    });
+    document.addEventListener('DOMContentLoaded', function() { fetchResults(); setInterval(fetchResults, 5000); });
   </script>
 </body>
 </html>
 """
 
-# Rutas de la aplicación
+# --- Rutas de la Aplicación ---
+@app.before_first_request
+def setup():
+    init_db()
+
 @app.route("/")
 def index():
-    """Renderiza la página principal. Los datos se cargarán vía Javascript."""
     return render_template_string(HTML_TEMPLATE)
 
 @app.route("/results")
 def get_results():
-    """Endpoint JSON para que el frontend obtenga los resultados."""
     records = get_all_records()
     return jsonify([dict(row) for row in records])
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    """Recibe el archivo, lo guarda y encola el trabajo de procesamiento."""
     f = request.files.get("file")
     if not f or not f.filename.lower().endswith(".zip"):
         flash("Debes subir un archivo .zip", "error")
         return redirect(url_for('index'))
-
-    # Guardar el archivo en el disco persistente
     filename = secure_filename(f.filename)
     zip_path = UPLOAD_FOLDER / filename
     f.save(zip_path)
-
-    # Añadir el trabajo a la cola de RQ
-    # El worker ejecutará la función `process_zip_file` del archivo `worker.py`
     q.enqueue('worker.process_zip_file', str(zip_path))
-
     flash(f"Archivo '{filename}' recibido. El procesamiento ha comenzado en segundo plano.", "success")
     return redirect(url_for('index'))
 
 @app.route("/clear", methods=["POST"])
 def clear():
-    """Limpia la base de datos de registros."""
-    clear_all_records()
+    conn = get_db_connection()
+    conn.execute('DELETE FROM registros')
+    conn.commit()
+    conn.close()
     flash("Registros borrados exitosamente.")
     return redirect(url_for('index'))
 
+# --- Punto de Entrada ---
 if __name__ == "__main__":
+    init_db()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
