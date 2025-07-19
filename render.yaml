@@ -1,6 +1,5 @@
 # render.yaml
-# Versión final corregida. Se elimina la sección "disks:" del final
-# y se simplifican las definiciones de los servicios.
+# Versión simplificada para resolver el error de despliegue (status 128)
 
 services:
   # 1. El servicio web que ejecuta la aplicación Flask
@@ -21,9 +20,9 @@ services:
       - key: UPLOAD_FOLDER
         value: /data/uploads
       - key: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/secrets/credentials.json # Ruta donde se montará el secreto
+        value: /etc/secrets/credentials.json
     secretFiles:
-      - key: GOOGLE_CREDENTIALS_JSON # El nombre del secreto que crearás en Render
+      - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
     disks:
       - name: ocr-storage
@@ -53,7 +52,6 @@ services:
     disks:
       - name: ocr-storage
         mountPath: /data
-        # El tamaño (sizeGB) solo es necesario la primera vez que se define el disco.
 
   # 3. La base de datos Redis para la cola de trabajos
   - type: redis
