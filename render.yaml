@@ -1,5 +1,6 @@
 # render.yaml
-# Versión corregida: El bloque 'disks' se mueve al nivel superior.
+# Versión final corregida. Se elimina la sección "disks:" del final
+# y se simplifican las definiciones de los servicios.
 
 services:
   # 1. El servicio web que ejecuta la aplicación Flask
@@ -19,14 +20,15 @@ services:
         value: /data/registros.db
       - key: UPLOAD_FOLDER
         value: /data/uploads
-      - fromSecretFile:
-          name: google-credentials
-          path: /etc/secrets/credentials.json
       - key: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/secrets/credentials.json
+        value: /etc/secrets/credentials.json # Ruta donde se montará el secreto
+    secretFiles:
+      - key: GOOGLE_CREDENTIALS_JSON # El nombre del secreto que crearás en Render
+        path: /etc/secrets/credentials.json
     disks:
-      - name: ocr-storage # Nombre del disco a montar
-        mountPath: /data   # Dónde se montará
+      - name: ocr-storage
+        mountPath: /data
+        sizeGB: 1
 
   # 2. El trabajador en segundo plano que procesa los archivos
   - type: worker
@@ -43,21 +45,17 @@ services:
           property: internalUrl
       - key: DATABASE_PATH
         value: /data/registros.db
-      - fromSecretFile:
-          name: google-credentials
-          path: /etc/secrets/credentials.json
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
+    secretFiles:
+      - key: GOOGLE_CREDENTIALS_JSON
+        path: /etc/secrets/credentials.json
     disks:
-      - name: ocr-storage # Nombre del disco a montar
-        mountPath: /data   # Dónde se montará
+      - name: ocr-storage
+        mountPath: /data
+        # El tamaño (sizeGB) solo es necesario la primera vez que se define el disco.
 
   # 3. La base de datos Redis para la cola de trabajos
   - type: redis
     name: ocr-redis
-    plan: free # O el plan que prefieras
-
-# Definición del disco persistente a nivel de Blueprint
-disks:
-  - name: ocr-storage
-    sizeGB: 1
+    plan: free
