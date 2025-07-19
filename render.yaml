@@ -1,5 +1,5 @@
 # render.yaml
-# Versión simplificada para resolver el error de despliegue (status 128)
+# Versión corregida para solucionar errores de sintaxis (secretFiles y disk).
 
 services:
   # 1. El servicio web que ejecuta la aplicación Flask
@@ -21,13 +21,13 @@ services:
         value: /data/uploads
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
-    secretFiles:
+    secretFiles: # <-- CORREGIDO: 'F' mayúscula
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
-    disks:
-      - name: ocr-storage
-        mountPath: /data
-        sizeGB: 1
+    disk: # <-- CORREGIDO: 'disk' en singular
+      name: ocr-storage
+      mountPath: /data
+      sizeGB: 1 # El tamaño solo se define la primera vez que se crea el disco
 
   # 2. El trabajador en segundo plano que procesa los archivos
   - type: worker
@@ -46,12 +46,12 @@ services:
         value: /data/registros.db
       - key: GOOGLE_APPLICATION_CREDENTIALS
         value: /etc/secrets/credentials.json
-    secretFiles:
+    secretFiles: # <-- CORREGIDO: 'F' mayúscula
       - key: GOOGLE_CREDENTIALS_JSON
         path: /etc/secrets/credentials.json
-    disks:
-      - name: ocr-storage
-        mountPath: /data
+    disk: # <-- CORREGIDO: 'disk' en singular
+      name: ocr-storage
+      mountPath: /data
 
   # 3. La base de datos Redis para la cola de trabajos
   - type: redis
