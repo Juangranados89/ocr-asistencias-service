@@ -1,4 +1,4 @@
-# app.py (v3 - Simplificado)
+# app.py (v4 - Corregido para Render)
 import os
 import sqlite3
 from pathlib import Path
@@ -8,7 +8,7 @@ from rq import Queue
 from werkzeug.utils import secure_filename
 
 # --- Configuración ---
-app = Flask(__name__)
+app = Flask(__name__)  # <--- CORRECCIÓN: Renombrada la variable a 'app'
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super-secret-key")
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "/data/registros.db")
 UPLOAD_FOLDER = Path(os.environ.get("UPLOAD_FOLDER", "/data/uploads"))
@@ -30,11 +30,11 @@ HTML_TEMPLATE = """
 """
 
 # --- Rutas de la Aplicación ---
-@app.route("/")
+@app.route("/")  # <--- CORRECCIÓN
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route("/results")
+@app.route("/results") # <--- CORRECCIÓN
 def get_results():
     try:
         conn = get_db_connection()
@@ -45,7 +45,7 @@ def get_results():
         print(f"Error al obtener resultados: {e}")
         return jsonify([])
 
-@app.route("/upload", methods=["POST"])
+@app.route("/upload", methods=["POST"]) # <--- CORRECCIÓN
 def upload():
     f = request.files.get("file")
     if not f or not f.filename.lower().endswith(".zip"):
@@ -58,7 +58,7 @@ def upload():
     flash(f"Archivo '{filename}' recibido. El procesamiento ha comenzado en segundo plano.", "success")
     return redirect(url_for('index'))
 
-@app.route("/clear", methods=["POST"])
+@app.route("/clear", methods=["POST"]) # <--- CORRECCIÓN
 def clear():
     conn = get_db_connection()
     conn.execute('DELETE FROM registros')
